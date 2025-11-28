@@ -4,8 +4,8 @@
 This repository contains the dataset and R Markdown code used for my **Advanced Data Analysis (ADA) Final Project**. The project evaluates whether county-level uninsurance is associated with chlamydia incidence rates in Missouri and examines whether this relationship differs by race, rurality, or gender composition. All analyses were conducted using R version 4.4.2.
 
 ## Files Included
-- `ADA_project.csv`: County-level dataset used in the analysis  
-- `Agyei_ADA_Markdown.Rmd`: Full R Markdown file containing all data cleaning, descriptive analysis, regression models, maps, and results  
+- `ada_project.csv`: County-level dataset used in the analysis  
+- `agyei_ada_markdown.Rmd`: Full R Markdown file containing all data cleaning, descriptive analysis, regression models, maps, and results  
 - `README.md`: This file  
 
 ## Data Source
