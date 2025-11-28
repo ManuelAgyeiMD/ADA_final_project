@@ -1,0 +1,628 @@
+---
+title: "Association between County-Level Health Insurance Coverage and Chlamydia Incidence
+  in Missouri, 2022."
+author: "Emmanuel Agyei"
+date: "2025-11-15"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r load data, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(tigris)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+
+# Set working directory
+setwd("/Users/emmanuelagyei/Desktop/FALL_2025/ADA/PROJECT/deliverables")
+
+# Load CSV file
+ADA_project <- read.csv("ADA_project.csv")
+
+# Preview data
+head(ADA_project)
+
+```
+```{r}
+
+# Set a seed for reproducibility
+set.seed(123)
+
+```
+# Data Cleaning and Inspection
+
+```{r}
+
+# Clean column names 
+ADA_project <- ADA_project |> janitor::clean_names()
+
+# View structure and first few rows
+glimpse(ADA_project)
+head(ADA_project)
+
+# Check for missing values in each column
+ADA_project |>
+  summarise(across(everything(), ~ sum(is.na(.)))) |>
+  t()  # Transpose for easier viewing
+
+# Verify key variables exist
+needed <- c(
+  "chlamydia_rate",
+  "percent_uninsured_adults",
+  "percent_non_hispanic_black",
+  "percent_rural",
+  "percent_female",
+  "percent_some_college",
+  "income_ratio",
+  "percent_unemployed"
+)
+setdiff(needed, names(ADA_project))
+
+```
+# Renaming and cleaning key variables ----
+```{r}
+
+# Rename variables to match the conceptual names
+ADA_project <- ADA_project |>
+  rename(
+    chlamydia_rate = chlamydia_rate,
+    percent_uninsured_adults = x_uninsured_adults_1,
+    percent_non_hispanic_black = x_non_hispanic_black_1,
+    percent_rural = x_rural,
+    percent_female = x_female,
+    percent_some_college = x_some_college,
+    percent_unemployed = x_unemployed
+  )
+
+# Remove rows with missing outcome (2 rows)
+ADA_project <- ADA_project |>
+  filter(!is.na(chlamydia_rate))
+
+# Confirm structure again
+glimpse(ADA_project)
+
+```
+# ---- Descriptive summaries ----
+
+```{r}
+# ---- Correlation matrix ----
+ADA_project %>%
+  dplyr::select(
+    chlamydia_rate,
+    percent_uninsured_adults,
+    percent_non_hispanic_black,
+    percent_rural,
+    percent_female,
+    percent_some_college,
+    income_ratio,
+    percent_unemployed
+  ) %>%
+  cor(use = "complete.obs") %>%
+  round(2)
+
+
+```
+# ---- Step 5: Center effect modifier variables ----
+```{r}
+
+
+ADA_project <- ADA_project %>%
+  mutate(
+    z_black  = percent_non_hispanic_black - mean(percent_non_hispanic_black, na.rm = TRUE),
+    z_rural  = percent_rural - mean(percent_rural, na.rm = TRUE),
+    z_female = percent_female - mean(percent_female, na.rm = TRUE)
+  )
+
+# Verify centering (mean should now be ≈ 0)
+ADA_project %>%
+  summarise(
+    mean_black  = mean(z_black),
+    mean_rural  = mean(z_rural),
+    mean_female = mean(z_female)
+  )
+
+```
+# ---- Step 6: Primary Poisson regression ----
+
+```{r include=FALSE}
+
+# Fit Poisson model
+model_pois <- glm(
+  chlamydia_rate ~ percent_uninsured_adults +
+    percent_some_college + income_ratio + percent_unemployed,
+  data = ADA_project,
+  family = poisson(link = "log")
+)
+
+# Exponentiate coefficients to get IRRs and 95% CI
+pois_irrs <- broom::tidy(model_pois, exponentiate = TRUE, conf.int = TRUE)
+pois_irrs
+
+```
+# ---- Step 7: Check for overdispersion ----
+
+```{r include=FALSE}
+
+# Calculate dispersion statistic
+dispersion <- sum(residuals(model_pois, type = "pearson")^2) / model_pois$df.residual
+dispersion
+
+# Quick interpretation
+if (dispersion > 1.5) {
+  cat("Overdispersion detected: consider Negative Binomial model.\n")
+} else {
+  cat("Dispersion acceptable: Poisson model is adequate.\n")
+}
+
+```
+
+# ---- Step 8: Negative Binomial regression ----
+
+```{r include=FALSE}
+
+
+library(MASS)
+
+# Fit NB model with same predictors
+model_nb <- MASS::glm.nb(
+  chlamydia_rate ~ percent_uninsured_adults +
+    percent_some_college + income_ratio + percent_unemployed,
+  data = ADA_project
+)
+
+# Summarize coefficients (IRRs)
+nb_irrs <- broom::tidy(model_nb, exponentiate = TRUE, conf.int = TRUE)
+nb_irrs
+
+```
+##. - Export negbin table to word
+```{r}
+library(gtsummary)
+library(flextable)
+library(officer)
+
+table_nb <- 
+  tbl_regression(
+    model_nb,
+    exponentiate = TRUE,  # IRRs
+    estimate_fun = ~style_sigfig(.x, digits = 3)
+  ) %>%
+  modify_header(label ~ "Predictor") %>%
+  modify_caption("**Table X. Negative Binomial Regression Model for Chlamydia Incidence (IRRs)**") %>%
+  as_flex_table()
+
+# Export to Word
+doc <- read_docx()
+doc <- body_add_flextable(doc, table_nb)
+print(doc, target = "NB_Model_Table.docx")
+
+```
+
+
+
+
+# ---- Step 9: Model comparison ----
+
+```{r}
+
+
+# Compare Poisson vs. Negative Binomial model fit
+library(lmtest)
+lrtest(model_pois, model_nb)
+
+```
+
+```{r}
+
+
+# Check residuals vs fitted values
+plot(fitted(model_nb), residuals(model_nb, type = "pearson"),
+     xlab = "Fitted values", ylab = "Pearson residuals",
+     main = "Residuals vs Fitted Values (Negative Binomial)")
+abline(h = 0, col = "red")
+
+# Identify potential influential counties (optional)
+library(car)
+influenceIndexPlot(model_nb, vars = c("Cook", "hat"), id.n = 3)
+
+```
+
+# ---- Step 11A: Interaction between uninsurance and % Black ----
+```{r echo=TRUE}
+
+model_nb_black_int <- MASS::glm.nb(
+  chlamydia_rate ~ percent_uninsured_adults * z_black +
+    percent_some_college + income_ratio + percent_unemployed,
+  data = ADA_project
+)
+
+# View IRRs
+nb_black_int_irrs <- broom::tidy(model_nb_black_int, exponentiate = TRUE, conf.int = TRUE)
+nb_black_int_irrs
+
+```
+
+# ---- Step 11B: Interaction between uninsurance and % rural ----
+```{r echo=TRUE}
+
+model_nb_rural_int <- MASS::glm.nb(
+  chlamydia_rate ~ percent_uninsured_adults * z_rural +
+    percent_some_college + income_ratio + percent_unemployed,
+  data = ADA_project
+)
+
+nb_rural_int_irrs <- broom::tidy(model_nb_rural_int, exponentiate = TRUE, conf.int = TRUE)
+nb_rural_int_irrs
+
+```
+# ---- Step 11C: Interaction between uninsurance and % female ----
+
+```{r echo=TRUE}
+
+model_nb_female_int <- MASS::glm.nb(
+  chlamydia_rate ~ percent_uninsured_adults * z_female +
+    percent_some_college + income_ratio + percent_unemployed,
+  data = ADA_project
+)
+
+nb_female_int_irrs <- broom::tidy(model_nb_female_int, exponentiate = TRUE, conf.int = TRUE)
+nb_female_int_irrs
+
+```
+# ---- Step 12: Interaction Plot ----
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+
+# Create predicted values for plotting
+new_data <- expand.grid(
+  percent_uninsured_adults = seq(min(ADA_project$percent_uninsured_adults),
+                                 max(ADA_project$percent_uninsured_adults),
+                                 length.out = 100),
+  z_black = quantile(ADA_project$z_black, probs = c(0.1, 0.5, 0.9)),  # low, median, high % Black
+  percent_some_college = mean(ADA_project$percent_some_college, na.rm = TRUE),
+  income_ratio = mean(ADA_project$income_ratio, na.rm = TRUE),
+  percent_unemployed = mean(ADA_project$percent_unemployed, na.rm = TRUE)
+)
+
+# Predict fitted values
+new_data$predicted_rate <- predict(model_nb_black_int, newdata = new_data, type = "response")
+
+# Label for clarity
+new_data$black_group <- factor(
+  new_data$z_black,
+  labels = c("Low % Black (10th percentile)", "Median % Black", "High % Black (90th percentile)")
+)
+
+# Plot
+ggplot(new_data, aes(x = percent_uninsured_adults, y = predicted_rate, color = black_group)) +
+  geom_line(size = 1.3) +
+  labs(
+    title = "Interaction Between % Uninsured and % Black Population",
+    x = "Percent Uninsured Adults",
+    y = "Predicted Chlamydia Incidence Rate (per 100,000)",
+    color = "County Racial Composition"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "top"
+  )
+
+```
+# Resolution reduction
+```{r}
+# ---- Step 12 (Enhanced): Interaction Plot with Confidence Bands ----
+
+library(ggplot2)
+library(dplyr)
+
+# Create predicted values and standard errors
+pred_data <- expand.grid(
+  percent_uninsured_adults = seq(min(ADA_project$percent_uninsured_adults),
+                                 max(ADA_project$percent_uninsured_adults),
+                                 length.out = 100),
+  z_black = quantile(ADA_project$z_black, probs = c(0.1, 0.5, 0.9)),
+  percent_some_college = mean(ADA_project$percent_some_college, na.rm = TRUE),
+  income_ratio = mean(ADA_project$income_ratio, na.rm = TRUE),
+  percent_unemployed = mean(ADA_project$percent_unemployed, na.rm = TRUE)
+)
+
+# Get fitted values and confidence intervals
+pred <- predict(model_nb_black_int, newdata = pred_data, type = "link", se.fit = TRUE)
+pred_data$fit <- exp(pred$fit)
+pred_data$lwr <- exp(pred$fit - 1.96 * pred$se.fit)
+pred_data$upr <- exp(pred$fit + 1.96 * pred$se.fit)
+
+# Label groups for legend
+pred_data$black_group <- factor(
+  pred_data$z_black,
+  labels = c("Low % Black (10th percentile)", "Median % Black", "High % Black (90th percentile)")
+)
+
+# Plot
+ggplot(pred_data, aes(x = percent_uninsured_adults, y = fit, color = black_group, fill = black_group)) +
+  geom_line(linewidth = 1.4) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr), alpha = 0.15, color = NA) +
+  scale_color_manual(values = c("#d95f02", "#1b9e77", "#7570b3")) +
+  scale_fill_manual(values = c("#d95f02", "#1b9e77", "#7570b3")) +
+  labs(
+    title = "Interaction Between % Uninsured and % Black Population",
+    x = "Percent Uninsured Adults",
+    y = "Predicted Chlamydia Incidence Rate (per 100,000)",
+    color = "County Racial Composition",
+    fill = "County Racial Composition"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+
+```{r}
+# Download directly to your project folder
+library(tigris)
+
+mo_map <- counties(state = "MO", cb = TRUE, year = 2022)
+
+```
+
+##--Supplementary Tables and Figures--
+
+
+```{r}
+
+# 1. Extract the interaction rows and label the effect modifier
+int_black <- nb_black_int_irrs %>%
+  filter(term == "percent_uninsured_adults:z_black") %>%
+  mutate(Modifier = "Race (% non-Hispanic Black)")
+
+int_rural <- nb_rural_int_irrs %>%
+  filter(term == "percent_uninsured_adults:z_rural") %>%
+  mutate(Modifier = "Rurality (% rural population)")
+
+int_female <- nb_female_int_irrs %>%
+  filter(term == "percent_uninsured_adults:z_female") %>%
+  mutate(Modifier = "Gender (% female population)")
+
+# 2. Combine and format into a nice summary table
+interaction_table <- bind_rows(int_black, int_rural, int_female) %>%
+  transmute(
+    `Effect modifier` = Modifier,
+    `Interaction term` = "Uninsurance × modifier",
+    `IRR (interaction)` = round(estimate, 3),
+    `95% CI` = paste0(round(conf.low, 3), " – ", round(conf.high, 3)),
+    `p-value` = signif(p.value, 3)
+  )
+
+# 3. Turn into a flextable
+ft_interactions <- flextable(interaction_table)
+ft_interactions <- autofit(ft_interactions)
+
+# 4. Export to Word
+doc <- read_docx()
+doc <- body_add_par(doc, "Table X. Interaction Between Uninsurance and County Characteristics (Negative Binomial Models)", style = "heading 2")
+doc <- body_add_flextable(doc, ft_interactions)
+
+print(doc, target = "NB_Interaction_Results.docx")
+
+```
+
+
+```{r}
+names(mo_map)
+head(mo_map)
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(viridis)
+
+# Join the ADA_project data to the tigris shapefile by county name
+mo_map_data <- mo_map %>%
+  left_join(ADA_project, by = c("NAME" = "county"))
+
+# Check for any counties not merged
+sum(is.na(mo_map_data$chlamydia_rate))  # should be 0 or very few
+
+# Plot
+ggplot(mo_map_data) +
+  geom_sf(aes(fill = chlamydia_rate), color = "white", size = 0.2) +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(
+    title = "Missouri County-Level Chlamydia Incidence (per 100,000)",
+    fill = "Rate"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+```
+
+
+```{r}
+library(ggrepel)  # helps prevent overlapping labels
+
+# Compute centroids (label positions)
+centroids <- mo_map_data %>%
+  st_centroid() %>%
+  mutate(
+    lon = st_coordinates(.)[,1],
+    lat = st_coordinates(.)[,2]
+  )
+
+# Plot map with labels
+ggplot(mo_map_data) +
+  geom_sf(aes(fill = chlamydia_rate), color = "white", size = 0.2) +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  geom_text(
+    data = centroids,
+    aes(x = lon, y = lat, label = NAME),
+    color = "black", size = 2.3, check_overlap = TRUE
+  ) +
+  labs(
+    title = "Missouri County-Level Chlamydia Incidence (per 100,000)",
+    fill = "Rate"
+  ) +
+  theme_void(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+```
+
+
+```{r}
+library(patchwork)
+
+map_chlamydia <- ggplot(mo_map_data) +
+  geom_sf(aes(fill = chlamydia_rate), color = "white") +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "Chlamydia Rate (per 100,000)", fill = "Rate") +
+  theme_void()
+
+map_uninsured <- ggplot(mo_map_data) +
+  geom_sf(aes(fill = percent_uninsured_adults), color = "white") +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "% Uninsured Adults", fill = "%") +
+  theme_void()
+
+map_chlamydia + map_uninsured
+
+```
+
+```{r}
+library(ggrepel)
+library(sf)
+library(patchwork)
+
+# Compute centroids (label coordinates)
+centroids <- mo_map_data %>%
+  st_centroid() %>%
+  mutate(
+    lon = st_coordinates(.)[,1],
+    lat = st_coordinates(.)[,2]
+  )
+
+# --- Map 1: Chlamydia Rate ---
+map_chlamydia <- ggplot(mo_map_data) +
+  geom_sf(aes(fill = chlamydia_rate), color = "white") +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  geom_text(
+    data = centroids,
+    aes(x = lon, y = lat, label = NAME),
+    color = "black", size = 2, check_overlap = TRUE
+  ) +
+  labs(title = "Chlamydia Rate (per 100,000)", fill = "Rate") +
+  theme_void()
+
+# --- Map 2: % Uninsured ---
+map_uninsured <- ggplot(mo_map_data) +
+  geom_sf(aes(fill = percent_uninsured_adults), color = "white") +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  geom_text(
+    data = centroids,
+    aes(x = lon, y = lat, label = NAME),
+    color = "black", size = 2, check_overlap = TRUE
+  ) +
+  labs(title = "% Uninsured Adults", fill = "%") +
+  theme_void()
+
+# Combine both
+map_chlamydia + map_uninsured
+
+```
+#---Table 1 Output
+
+```{r}
+library(dplyr)
+library(knitr)
+library(tidyr)
+
+# --- Clean, publication-style Table 1 ---
+table1 <- ADA_project %>%
+  summarise(
+    `Chlamydia rate (per 100,000)` = paste0(
+      round(mean(chlamydia_rate, na.rm = TRUE), 1), " ± ",
+      round(sd(chlamydia_rate, na.rm = TRUE), 1)
+    ),
+    `% Uninsured adults` = paste0(
+      round(mean(percent_uninsured_adults, na.rm = TRUE), 1), " ± ",
+      round(sd(percent_uninsured_adults, na.rm = TRUE), 1)
+    ),
+    `% Non-Hispanic Black` = paste0(
+      round(mean(percent_non_hispanic_black, na.rm = TRUE), 1), " ± ",
+      round(sd(percent_non_hispanic_black, na.rm = TRUE), 1)
+    ),
+    `% Rural population` = paste0(
+      round(mean(percent_rural, na.rm = TRUE), 1), " ± ",
+      round(sd(percent_rural, na.rm = TRUE), 1)
+    ),
+    `% Female population` = paste0(
+      round(mean(percent_female, na.rm = TRUE), 1), " ± ",
+      round(sd(percent_female, na.rm = TRUE), 1)
+    ),
+    `% Some college education` = paste0(
+      round(mean(percent_some_college, na.rm = TRUE), 1), " ± ",
+      round(sd(percent_some_college, na.rm = TRUE), 1)
+    ),
+    `Income ratio (inequality)` = paste0(
+      round(mean(income_ratio, na.rm = TRUE), 2), " ± ",
+      round(sd(income_ratio, na.rm = TRUE), 2)
+    ),
+    `% Unemployed` = paste0(
+      round(mean(percent_unemployed, na.rm = TRUE), 1), " ± ",
+      round(sd(percent_unemployed, na.rm = TRUE), 1)
+    )
+  ) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Variable",
+               values_to = "Mean ± SD")
+
+kable(
+  table1,
+  caption = "Table 1. Descriptive Statistics for Missouri Counties (n = 113)",
+  align = c("l", "c")
+)
+
+```
+
+
+
+```{r}
+getwd()
+
+library(flextable)
+library(officer)
+
+# Convert your table1 to a flextable
+ft_table1 <- flextable(table1)
+
+# Add a title/caption inside the document
+doc <- read_docx()
+doc <- body_add_par(doc, "Table 1. Descriptive Statistics for Missouri Counties (n = 113)", style = "heading 2")
+doc <- body_add_flextable(doc, ft_table1)
+
+# Save the Word document
+print(doc, target = "Table1_Missouri_Counties.docx")
+
+
+```
+
